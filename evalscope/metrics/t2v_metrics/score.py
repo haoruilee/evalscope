@@ -3,9 +3,10 @@ import torch.nn as nn
 from abc import abstractmethod
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from typing import List, TypedDict, Union
+from typing import List, Optional, TypedDict, Union
 
 from .constants import CACHE_DIR
+from .models.model import resolve_device
 
 
 class ImageTextDict(TypedDict):
@@ -15,13 +16,17 @@ class ImageTextDict(TypedDict):
 
 class Score(nn.Module):
 
-    def __init__(self, model: str, device: str = 'cuda', cache_dir: str = CACHE_DIR, **kwargs):
-        """Initialize the ScoreModel
+    def __init__(self, model: str, device: Optional[str] = 'cuda', cache_dir: str = CACHE_DIR, **kwargs):
+        """Initialize the ScoreModel.
+
+        ``device`` is auto-resolved through ``resolve_device`` so that the
+        underlying score model runs on whatever accelerator is actually
+        available (CUDA, NPU, MPS, or CPU). See issue #1331.
         """
         super().__init__()
         assert model in self.list_all_models()
-        self.device = device
-        self.model = self.prepare_scoremodel(model, device, cache_dir, **kwargs)
+        self.device = resolve_device(device)
+        self.model = self.prepare_scoremodel(model, self.device, cache_dir, **kwargs)
 
     @abstractmethod
     def prepare_scoremodel(self, model: str, device: str, cache_dir: str, **kwargs):

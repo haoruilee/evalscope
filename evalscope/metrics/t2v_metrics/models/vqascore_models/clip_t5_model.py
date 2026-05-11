@@ -1,5 +1,5 @@
 import torch
-from typing import List
+from typing import List, Optional
 
 from ...constants import CACHE_DIR, CONTEXT_LEN, DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, SYSTEM_MSG
 from .clip_t5.model import CLIPT5ForConditionalGeneration, ModelArguments
@@ -61,7 +61,7 @@ CLIP_T5_MODELS = {
 class CLIPT5Model(VQAScoreModel):
     """A wrapper for the CLIP-FlanT5 or CLIP-T5 models"""
 
-    def __init__(self, model_name='clip-flant5-xxl', device='cuda', cache_dir=CACHE_DIR):
+    def __init__(self, model_name='clip-flant5-xxl', device: Optional[str] = 'cuda', cache_dir=CACHE_DIR):
         assert model_name in CLIP_T5_MODELS
         super().__init__(model_name=model_name, device=device, cache_dir=cache_dir)
 
@@ -115,7 +115,6 @@ class CLIPT5Model(VQAScoreModel):
         return image
 
     @torch.no_grad()
-    @torch.autocast(device_type='cuda', dtype=torch.bfloat16)
     def forward(
         self,
         images: List[str],
@@ -126,59 +125,61 @@ class CLIPT5Model(VQAScoreModel):
         """Forward pass of the model to return n scores for n (image, text) pairs (in PyTorch Tensor)
         """
         assert len(images) == len(texts), 'Number of images and texts must match'
-        # Turn "a photo of a dog" into
-        # Q: "Does this figure show "a photo of a dog"? Please answer yes or no."
-        # A: "Yes"
-        questions = [question_template.format(text) for text in texts]
-        answers = [answer_template.format(text) for text in texts]
+        with self.maybe_autocast(dtype=torch.bfloat16):
+            # Turn "a photo of a dog" into
+            # Q: "Does this figure show "a photo of a dog"? Please answer yes or no."
+            # A: "Yes"
+            questions = [question_template.format(text) for text in texts]
+            answers = [answer_template.format(text) for text in texts]
 
-        # Formatting for CLIP-FlanT5 desired input including system message and image tokens
-        questions = [format_question(question, conversation_style=self.conversational_style) for question in questions]
-        answers = [format_answer(answer, conversation_style=self.conversational_style) for answer in answers]
+            # Formatting for CLIP-FlanT5 desired input including system message and image tokens
+            questions = [
+                format_question(question, conversation_style=self.conversational_style) for question in questions
+            ]
+            answers = [format_answer(answer, conversation_style=self.conversational_style) for answer in answers]
 
-        images = self.load_images(images)
+            images = self.load_images(images)
 
-        input_ids = [t5_tokenizer_image_token(qs, self.tokenizer, return_tensors='pt') for qs in questions]
-        labels = [t5_tokenizer_image_token(ans, self.tokenizer, return_tensors='pt') for ans in answers]
+            input_ids = [t5_tokenizer_image_token(qs, self.tokenizer, return_tensors='pt') for qs in questions]
+            labels = [t5_tokenizer_image_token(ans, self.tokenizer, return_tensors='pt') for ans in answers]
 
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
-        input_ids = input_ids[:, :self.tokenizer.model_max_length]
-        labels = labels[:, :self.tokenizer.model_max_length]
+            input_ids = torch.nn.utils.rnn.pad_sequence(
+                input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+            )
+            labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+            input_ids = input_ids[:, :self.tokenizer.model_max_length]
+            labels = labels[:, :self.tokenizer.model_max_length]
 
-        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
-        decoder_attention_mask = labels.ne(IGNORE_INDEX)
+            attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+            decoder_attention_mask = labels.ne(IGNORE_INDEX)
 
-        input_ids, attention_mask, decoder_attention_mask, labels = input_ids.to(self.device), \
-            attention_mask.to(self.device), decoder_attention_mask.to(self.device), labels.to(self.device)
-        model_input_kwargs = {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'decoder_attention_mask': decoder_attention_mask,
-            'labels': labels,
-            'images': images,
-            'past_key_values': None,
-            'inputs_embeds': None,
-            'use_cache': None,
-            'output_attentions': None,
-            'output_hidden_states': None,
-            'return_dict': True,
-        }
+            input_ids, attention_mask, decoder_attention_mask, labels = input_ids.to(self.device), \
+                attention_mask.to(self.device), decoder_attention_mask.to(self.device), labels.to(self.device)
+            model_input_kwargs = {
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'decoder_attention_mask': decoder_attention_mask,
+                'labels': labels,
+                'images': images,
+                'past_key_values': None,
+                'inputs_embeds': None,
+                'use_cache': None,
+                'output_attentions': None,
+                'output_hidden_states': None,
+                'return_dict': True,
+            }
 
-        outputs = self.model(**model_input_kwargs)
+            outputs = self.model(**model_input_kwargs)
 
-        logits = outputs.logits
-        lm_prob = torch.zeros(logits.shape[0])
-        loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
-        for k in range(lm_prob.shape[0]):
-            lm_prob[k] = (-loss_fct(logits[k],
-                                    labels[k])).exp()  # exp to cancel the log and get raw prob between 0 and 1
+            logits = outputs.logits
+            lm_prob = torch.zeros(logits.shape[0])
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+            for k in range(lm_prob.shape[0]):
+                lm_prob[k] = (-loss_fct(logits[k],
+                                        labels[k])).exp()  # exp to cancel the log and get raw prob between 0 and 1
         return lm_prob
 
     @torch.no_grad()
-    @torch.autocast(device_type='cuda', dtype=torch.bfloat16)
     def generate(
         self,
         images: List[str],
@@ -188,34 +189,34 @@ class CLIPT5Model(VQAScoreModel):
         """Forward pass of the model to return n strings for n (image, prompt) pairs
         """
         assert len(images) == len(prompts), 'Number of images and texts must match'
+        with self.maybe_autocast(dtype=torch.bfloat16):
+            # Formatting for CLIP-FlanT5 desired input including system message and image tokens
+            questions = [format_question(prompt, conversation_style=self.conversational_style) for prompt in prompts]
+            images = self.load_images(images)
 
-        # Formatting for CLIP-FlanT5 desired input including system message and image tokens
-        questions = [format_question(prompt, conversation_style=self.conversational_style) for prompt in prompts]
-        images = self.load_images(images)
+            input_ids = [t5_tokenizer_image_token(qs, self.tokenizer, return_tensors='pt') for qs in questions]
+            input_ids = torch.nn.utils.rnn.pad_sequence(
+                input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+            )
+            input_ids = input_ids[:, :self.tokenizer.model_max_length]
 
-        input_ids = [t5_tokenizer_image_token(qs, self.tokenizer, return_tensors='pt') for qs in questions]
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        input_ids = input_ids[:, :self.tokenizer.model_max_length]
+            attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
 
-        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+            input_ids, attention_mask = input_ids.to(self.device), attention_mask.to(self.device)
+            model_input_kwargs = {
+                'inputs': input_ids,
+                'images': images,
+                'attention_mask': attention_mask,
+                'do_sample': True if temperature > 0 else False,
+                'temperature': temperature,
+                'top_p': None,
+                'num_beams': 1,
+                'max_new_token': 1024,
+                'use_cache': True,
+            }
 
-        input_ids, attention_mask = input_ids.to(self.device), attention_mask.to(self.device)
-        model_input_kwargs = {
-            'inputs': input_ids,
-            'images': images,
-            'attention_mask': attention_mask,
-            'do_sample': True if temperature > 0 else False,
-            'temperature': temperature,
-            'top_p': None,
-            'num_beams': 1,
-            'max_new_token': 1024,
-            'use_cache': True,
-        }
-
-        outputs = self.model.generate(**model_input_kwargs)
-        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            outputs = self.model.generate(**model_input_kwargs)
+            outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
         for i in range(len(outputs)):
             if outputs[i].endswith(' '):
                 outputs[i] = outputs[i][:-1]

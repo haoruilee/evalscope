@@ -75,7 +75,7 @@ class HPSV2ScoreModel(ScoreModel):
             # Process the prompt
             text = self.tokenizer([caption]).to(device=self.device, non_blocking=True)  # Updated to use texts[i]
             # Calculate the HPS
-            with torch.amp.autocast(device_type=self.device):
+            with self.maybe_autocast():
                 outputs = self.model(image, text)
                 image_features, text_features = outputs['image_features'], outputs['text_features']
                 logits_per_image = image_features @ text_features.T

@@ -1,7 +1,7 @@
 import os
 import torch
 from modelscope import AutoTokenizer
-from typing import List, Union
+from typing import List, Optional, Union
 
 from ...constants import CACHE_DIR
 from ..model import ScoreModel
@@ -26,7 +26,7 @@ def get_index(list1, list2):
 class FGA_BLIP2ScoreModel(ScoreModel):
     'A wrapper for FGA BLIP-2 ITMScore models'
 
-    def __init__(self, model_name='fga_blip2', device='cuda', cache_dir=CACHE_DIR):
+    def __init__(self, model_name='fga_blip2', device: Optional[str] = 'cuda', cache_dir=CACHE_DIR):
         assert model_name in FGA_BLIP2_MODELS, f'Model name must be one of {FGA_BLIP2_MODELS.keys()}'
         os.environ['TORCH_HOME'] = cache_dir
         super().__init__(model_name=model_name, device=device, cache_dir=cache_dir)
@@ -55,45 +55,45 @@ class FGA_BLIP2ScoreModel(ScoreModel):
         pass
 
     @torch.no_grad()
-    @torch.autocast(device_type='cuda', dtype=torch.float16)
     def forward(self, images: List[str], texts: List[Union[str, dict]]) -> torch.Tensor:
         """Forward pass of the model to return n scores for n (image, text) pairs (in PyTorch Tensor)
         """
         assert len(images) == len(texts), 'Number of images and texts must match'
 
         result_list = []
-        for image_path, text in zip(images, texts):
-            if isinstance(text, str):
-                elements = []  # elements scores
-                prompt = text
-            else:
-                elements = text['tags']
-                prompt = text['prompt']
-
-            image = self.image_loader(image_path)
-            image = self.vis_processors['eval'](image).to(self.device)
-            prompt = self.text_processors['eval'](prompt)
-            prompt_ids = self.tokenizer(prompt).input_ids
-
-            alignment_score, scores = self.model.element_score(image.unsqueeze(0), [prompt])
-
-            elements_score = dict()
-            for element in elements:
-                element_ = element.rpartition('(')[0]
-                element_ids = self.tokenizer(element_).input_ids[1:-1]
-
-                idx = get_index(element_ids, prompt_ids)
-                if idx:
-                    mask = [0] * len(prompt_ids)
-                    mask[idx:idx + len(element_ids)] = [1] * len(element_ids)
-
-                    mask = torch.tensor(mask).to(self.device)
-                    elements_score[element] = (scores * mask).sum() / mask.sum()
+        with self.maybe_autocast(dtype=torch.float16):
+            for image_path, text in zip(images, texts):
+                if isinstance(text, str):
+                    elements = []  # elements scores
+                    prompt = text
                 else:
-                    elements_score[element] = torch.tensor(0.0).to(self.device)
-            if elements_score:
-                result_list.append({'overall_score': alignment_score, **elements_score})
-            else:
-                result_list.append(alignment_score)
+                    elements = text['tags']
+                    prompt = text['prompt']
+
+                image = self.image_loader(image_path)
+                image = self.vis_processors['eval'](image).to(self.device)
+                prompt = self.text_processors['eval'](prompt)
+                prompt_ids = self.tokenizer(prompt).input_ids
+
+                alignment_score, scores = self.model.element_score(image.unsqueeze(0), [prompt])
+
+                elements_score = dict()
+                for element in elements:
+                    element_ = element.rpartition('(')[0]
+                    element_ids = self.tokenizer(element_).input_ids[1:-1]
+
+                    idx = get_index(element_ids, prompt_ids)
+                    if idx:
+                        mask = [0] * len(prompt_ids)
+                        mask[idx:idx + len(element_ids)] = [1] * len(element_ids)
+
+                        mask = torch.tensor(mask).to(self.device)
+                        elements_score[element] = (scores * mask).sum() / mask.sum()
+                    else:
+                        elements_score[element] = torch.tensor(0.0).to(self.device)
+                if elements_score:
+                    result_list.append({'overall_score': alignment_score, **elements_score})
+                else:
+                    result_list.append(alignment_score)
 
         return result_list
